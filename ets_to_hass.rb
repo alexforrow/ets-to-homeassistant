@@ -3,6 +3,7 @@
 
 # Laurent Martin
 # translate configuration from ETS into KNXWeb and Home Assistant
+require 'bundler/setup'
 require 'zip'
 require 'xmlsimple'
 require 'yaml'
@@ -121,7 +122,7 @@ class ConfigurationImporter
     end
     # Index is the internal Id in xml file
     @data[:ga][ga['Id'].freeze] = group.freeze
-    @logger.debug("group: #{group}")
+    @logger.debug("group #{ga['Id']}: #{group}")
   end
 
   # process locations recursively, and find functions
@@ -154,6 +155,7 @@ class ConfigurationImporter
           name: f['Name'].freeze,
           type: type,
           ga: f['GroupAddressRef'].map { |g| g['RefId'].freeze },
+          roles: f['GroupAddressRef'].map { |g| [g['Role'], g['RefId'].freeze] }.to_h,
           custom: {} # custom values
         }.merge(info)
         # store reference to this object in the GAs
@@ -168,7 +170,7 @@ class ConfigurationImporter
     haknx = {}
     # warn of group addresses that will not be used (you can fix in custom lambda)
     @data[:ga].values.select { |ga| ga[:objs].empty? }.each do |ga|
-      @logger.warn("group not in object: #{ga[:address]}: Create custom object in lambda if needed , or use ETS to create functions")
+      @logger.warn("group not in object: #{ga[:address]}:#{ga[:name]}: Create custom object in lambda if needed, or use ETS to create functions")
     end
     @data[:ob].each_value do |o|
       new_obj = o[:custom].key?(:ha_init) ? o[:custom][:ha_init] : {}
@@ -181,7 +183,8 @@ class ConfigurationImporter
           case o[:type]
           when :switchable_light, :dimmable_light then 'light'
           when :sun_protection then 'cover'
-          when :custom, :heating_continuous_variable, :heating_floor, :heating_radiator, :heating_switching_variable
+          when :heating_switching_variable then 'climate'
+          when :custom, :heating_continuous_variable, :heating_floor, :heating_radiator
             @logger.warn("function type not implemented for #{o[:name]}/#{o[:room]}: #{o[:type]}")
             next
           else @logger.error("function type not supported for #{o[:name]}/#{o[:room]}, please report: #{o[:type]}")
@@ -189,7 +192,7 @@ class ConfigurationImporter
           end
         end
       # process all group addresses in function
-      o[:ga].each do |garef|
+      o[:roles].each do |role, garef|
         ga = @data[:ga][garef]
         next if ga.nil?
 
@@ -197,7 +200,27 @@ class ConfigurationImporter
         ha_address_type =
           if ga[:custom].key?(:ha_address_type)
             ga[:custom][:ha_address_type]
+          elsif !role.empty?
+            case role
+            # light
+            when 'SwitchOnOff' then 'address'
+            when 'InfoOnOff' then 'state_address'
+            when 'DimmingValue' then 'brightness_address'
+            when 'InfoDimmingValue' then 'brightness_state_address'
+            when 'DimmingControl' then
+              @logger.debug("#{ga[:address]}(#{ha_obj_type}:#{ga[:datapoint]}:#{ga[:name]}): '#{role}' role not support in Home Assistant")
+
+            # climate
+            when 'TempRoom' then 'temperature_address'
+            when 'TempRoomSetpoint' then 'target_temperature_address'
+            when 'HVACMode' then 'controller_mode_address'
+            when 'ValveSwitch' then 'on_off_address'
+
+            else @logger.warn("#{ga[:address]}(#{ha_obj_type}:#{ga[:datapoint]}:#{ga[:name]}): Unknown role '#{role.inspect}'")
+              next
+            end
           else
+            @logger.warn("#{ga[:address]}(#{ha_obj_type}:#{ga[:datapoint]}:#{ga[:name]}): No role set, falling back to datapoint type")
             case ga[:datapoint]
             when '1.001' then 'address' # switch on/off or state
             when '1.008' then 'move_long_address' # up/down
@@ -211,11 +234,26 @@ class ConfigurationImporter
               # custom code tells what is state
               case ha_obj_type
               when 'light' then 'brightness_address'
+#              when 'light' then
+#                case role
+#                when 'DimmingValue' then 'brightness_address'
+#                when 'InfoDimmingValue' then 'brightness_state_address'
+#                else @logger.warn("#{ga[:address]}(#{ha_obj_type}:#{ga[:datapoint]}:#{ga[:name]}): no mapping for datapoint #{ga[:datapoint]} with role '#{role}'")
+#                     next
+#                end
               when 'cover' then 'position_address'
               else @logger.warn("#{ga[:address]}(#{ha_obj_type}:#{ga[:datapoint]}:#{ga[:name]}): no mapping for datapoint #{ga[:datapoint]}")
 
                    next
               end
+#            when '9.001'
+#              #pp ga
+#              # custom code tells what is state
+#              case ha_obj_type
+#              when 'climate' then 'temperature_address'
+#              else @logger.warn("#{ga[:address]}(#{ha_obj_type}:#{ga[:datapoint]}:#{ga[:name]}): no mapping for datapoint #{ga[:datapoint]}")
+#                   next
+#              end
             else
               @logger.warn("#{ga[:address]}(#{ha_obj_type}:#{ga[:datapoint]}:#{ga[:name]}): no mapping for datapoint #{ga[:datapoint]}")
 
